@@ -1,9 +1,10 @@
 name: CI (OpenVINO)
 
 on:
-  # manual trigger and scheduled runs for testing
   workflow_dispatch:
   push:
+    branches:
+      - win-openvino
     tags:
       - 'v*'
     paths:
