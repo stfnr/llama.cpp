@@ -1,0 +1,357 @@
+name: CI (OpenVINO)
+
+on:
+  # manual trigger and scheduled runs for testing
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+    paths:
+      - '.github/workflows/build-openvino.yml'
+      - 'ggml/src/ggml-openvino/**'
+      - '**/CMakeLists.txt'
+      - '**/*.cpp'
+      - '**/*.h'
+      - '**/*.hpp'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  GGML_NLOOP: 3
+  GGML_N_THREADS: 1
+  LLAMA_LOG_COLORS: 1
+  LLAMA_LOG_PREFIX: 1
+  LLAMA_LOG_TIMESTAMPS: 1
+  # OpenVINO version configuration
+  OPENVINO_VERSION_MAJOR: '2026.0'
+  OPENVINO_VERSION_FULL: '2026.0.0.20965.c6d6a13a886'
+
+jobs:
+  # Windows build with OpenVINO backend
+  windows-openvino:
+    runs-on: windows-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Build with OpenVINO backend (CPU/GPU/NPU support via runtime env var)
+          - { arch: x64, build: Release }
+
+    env:
+      VS_PATH: 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise'
+      OPENVINO_DIR: 'C:\Program Files (x86)\Intel\openvino_2026.0'
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+
+      - name: Install System Tools
+        shell: pwsh
+        run: |
+          # winget install Git.Git -e --silent
+          # winget install GNU.Wget -e --silent
+          # winget install Ninja-build.Ninja -e --silent
+          # Note: Git, CMake, and Ninja are pre-installed on windows-latest runners
+          ninja --version
+          cmake --version
+
+      - name: Install OpenCL via vcpkg
+        shell: pwsh
+        run: |
+          cd C:\vcpkg
+          .\bootstrap-vcpkg.bat
+          .\vcpkg install opencl:x64-windows
+          .\vcpkg integrate install
+
+      - name: Download and Install OpenVINO Runtime
+        shell: pwsh
+        run: |
+          $ov_url = "https://storage.openvinotoolkit.org/repositories/openvino/packages/${{ env.OPENVINO_VERSION_MAJOR }}/windows/openvino_toolkit_windows_${{ env.OPENVINO_VERSION_FULL }}_x86_64.zip"
+          Write-Host "Downloading OpenVINO from: $ov_url"
+
+          Invoke-WebRequest -Uri $ov_url -OutFile openvino.zip
+          Expand-Archive -Path openvino.zip -DestinationPath "C:\Program Files (x86)\Intel"
+
+          # Verify extraction
+          $extractedPath = Get-ChildItem -Path "C:\Program Files (x86)\Intel" -Directory | Where-Object { $_.Name -like "openvino_toolkit_windows_*" } | Select-Object -First 1
+          if ($extractedPath) {
+              Rename-Item -Path $extractedPath.FullName -NewName "openvino_${{ env.OPENVINO_VERSION_MAJOR }}"
+          } else {
+              # Check if already named correctly
+              if (Test-Path "${{ env.OPENVINO_DIR }}") {
+                  Write-Host "OpenVINO already installed at: ${{ env.OPENVINO_DIR }}"
+              } else {
+                  throw "OpenVINO extraction failed"
+              }
+          }
+
+          # Verify setupvars.bat exists
+          $setupVars = "${{ env.OPENVINO_DIR }}\setupvars.bat"
+          if (Test-Path $setupVars) {
+              Write-Host "OpenVINO setupvars.bat found at: $setupVars"
+          } else {
+              # Try alternate path structure
+              $alternatePath = "C:\Program Files (x86)\Intel\openvino_toolkit_windows_${{ env.OPENVINO_VERSION_FULL }}_x86_64\setupvars.bat"
+              if (Test-Path $alternatePath) {
+                  Write-Host "Found setupvars at alternate location: $alternatePath"
+                  # Create symlink for consistency
+                  New-Item -ItemType SymbolicLink -Path "${{ env.OPENVINO_DIR }}" -Target (Split-Path $alternatePath)
+              } else {
+                  Get-ChildItem -Path "C:\Program Files (x86)\Intel" -Recurse -Filter "setupvars.bat" | Select-Object -First 5
+                  throw "setupvars.bat not found"
+              }
+          }
+
+      - name: Build llama.cpp with OpenVINO
+        shell: cmd
+        run: |
+          call "${{ env.VS_PATH }}\VC\Auxiliary\Build\vcvars64.bat"
+          call "${{ env.OPENVINO_DIR }}\setupvars.bat"
+          
+          echo "Building llama.cpp with OpenVINO backend..."
+          cmake -B build\ReleaseOV -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build }} ^
+            -DGGML_OPENVINO=ON ^
+            -DLLAMA_CURL=OFF ^
+            -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake
+          
+          cmake --build build\ReleaseOV --parallel
+
+      - name: Package Artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+
+          # Copy llama.cpp binaries
+          Copy-Item build\ReleaseOV\bin\llama-server.exe dist\
+          Copy-Item build\ReleaseOV\bin\llama-cli.exe dist\
+          Copy-Item build\ReleaseOV\bin\llama-bench.exe dist\
+
+          # Copy OpenVINO core runtime DLLs next to the executables so the loader finds them
+          $ovBinPath = "${{ env.OPENVINO_DIR }}\runtime\bin\intel64\Release"
+          $ovBinPathAlt = "${{ env.OPENVINO_DIR }}\bin\intel64\Release"
+
+          if (Test-Path $ovBinPath) {
+              Copy-Item "$ovBinPath\*.dll" dist\
+          } elseif (Test-Path $ovBinPathAlt) {
+              Copy-Item "$ovBinPathAlt\*.dll" dist\
+          } else {
+              Write-Host "Searching for OpenVINO DLLs..."
+              Get-ChildItem -Path "${{ env.OPENVINO_DIR }}" -Recurse -Filter "openvino.dll" | Select-Object -First 5
+              $altPaths = @(
+                  "${{ env.OPENVINO_DIR }}\*\bin\intel64\Release",
+                  "${{ env.OPENVINO_DIR }}\*\runtime\bin"
+              )
+              foreach ($path in $altPaths) {
+                  $dllFiles = Get-ChildItem -Path $path -Filter "*.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+                  if ($dllFiles) {
+                      Copy-Item "$path\*.dll" dist\
+                      break
+                  }
+              }
+          }
+
+          # Copy bundled TBB and OpenMP runtime DLLs (required by OpenVINO at runtime)
+          $tbbPath = "${{ env.OPENVINO_DIR }}\runtime\3rdparty\tbb\bin"
+          if (Test-Path $tbbPath) {
+              Copy-Item "$tbbPath\*.dll" dist\
+          }
+          $ompPath = "${{ env.OPENVINO_DIR }}\runtime\3rdparty\omp\bin"
+          if (Test-Path $ompPath) {
+              Copy-Item "$ompPath\*.dll" dist\
+          }
+
+          # Create ZIP archive
+          Compress-Archive -Path dist\* -DestinationPath llama-openvino-windows-${{ matrix.arch }}-${{ matrix.build }}.zip
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-openvino-windows-${{ matrix.arch }}-${{ matrix.build }}
+          path: llama-openvino-windows-${{ matrix.arch }}-${{ matrix.build }}.zip
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: llama-openvino-windows-${{ matrix.arch }}-${{ matrix.build }}.zip
+          body: |
+            OpenVINO backend build for Windows x64
+            
+            ## Supported Devices
+            - CPU (default)
+            - Intel GPU (integrated and discrete)
+            - Intel NPU
+            
+            ## Runtime Configuration
+            Set the target device using environment variable:
+            ```batch
+            # For Intel GPU
+            set GGML_OPENVINO_DEVICE=GPU
+            set GGML_OPENVINO_STATEFUL_EXECUTION=1
+            llama-server.exe -m model.gguf -c 4096 --port 8080
+            
+            # For Intel NPU
+            set GGML_OPENVINO_DEVICE=NPU
+            llama-server.exe -m model.gguf -c 512 --port 8080
+            ```
+            
+            ## Known Limitations
+            - llama-server with NPU supports only one parallel session (`-np 1`)
+            - NPU requires context size explicitly set to <=1024
+            - Model caching not supported on NPU
+            - GGML_OPENVINO_STATEFUL_EXECUTION=1 must NOT be set for NPU
+            
+            ## Runtime Requirements
+            - Intel GPU/NPU drivers must be installed on the target machine
+            - OpenVINO runtime DLLs are bundled alongside the executables
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Linux build with OpenVINO backend
+  linux-openvino:
+    runs-on: ubuntu-24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { build: Release }
+
+    env:
+      OPENVINO_DIR: '/opt/intel/openvino'
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates \
+            git \
+            cmake \
+            ninja-build \
+            build-essential \
+            libtbb12 \
+            libssl-dev \
+            ocl-icd-opencl-dev \
+            opencl-headers \
+            opencl-clhpp-headers \
+            intel-opencl-icd
+
+      - name: Download and Install OpenVINO Runtime
+        run: |
+          ov_url="https://storage.openvinotoolkit.org/repositories/openvino/packages/${OPENVINO_VERSION_MAJOR}/linux/l_openvino_toolkit_ubuntu24_${OPENVINO_VERSION_FULL}_x86_64.tgz"
+          echo "Downloading OpenVINO from: $ov_url"
+          
+          wget -q "$ov_url" -O openvino.tgz
+          sudo mkdir -p /opt/intel
+          sudo tar -xf openvino.tgz -C /opt/intel
+          
+          # Find and rename extracted directory
+          extracted_dir=$(ls /opt/intel | grep l_openvino_toolkit | head -n1)
+          if [ -n "$extracted_dir" ]; then
+              sudo mv "/opt/intel/$extracted_dir" "/opt/intel/openvino_${OPENVINO_VERSION_MAJOR}"
+              sudo ln -sf "/opt/intel/openvino_${OPENVINO_VERSION_MAJOR}" /opt/intel/openvino
+          fi
+          
+          # Install dependencies
+          if [ -f "${OPENVINO_DIR}/install_dependencies/install_openvino_dependencies.sh" ]; then
+              echo "Y" | sudo "${OPENVINO_DIR}/install_dependencies/install_openvino_dependencies.sh"
+          fi
+          
+          # Verify installation
+          ls -la "${OPENVINO_DIR}/"
+
+      - name: Build llama.cpp with OpenVINO
+        run: |
+          source "${OPENVINO_DIR}/setupvars.sh"
+          
+          echo "Building llama.cpp with OpenVINO backend..."
+          cmake -B build/ReleaseOV -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build }} \
+            -DGGML_OPENVINO=ON
+          
+          cmake --build build/ReleaseOV --parallel
+
+      - name: Package Artifacts
+        run: |
+          mkdir -p dist/openvino-runtime
+          
+          # Copy llama.cpp binaries
+          cp build/ReleaseOV/bin/llama-server dist/
+          cp build/ReleaseOV/bin/llama-cli dist/
+          cp build/ReleaseOV/bin/llama-bench dist/
+          
+          # Copy required OpenVINO runtime libraries
+          if [ -d "${OPENVINO_DIR}/runtime/lib/intel64" ]; then
+              cp -P "${OPENVINO_DIR}/runtime/lib/intel64"/lib*.so* dist/openvino-runtime/ 2>/dev/null || true
+          elif [ -d "${OPENVINO_DIR}/lib/intel64" ]; then
+              cp -P "${OPENVINO_DIR}/lib/intel64"/lib*.so* dist/openvino-runtime/ 2>/dev/null || true
+          fi
+          
+          # Create tarball
+          tar -czf llama-openvino-linux-x64-${{ matrix.build }}.tar.gz -C dist .
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-openvino-linux-x64-${{ matrix.build }}
+          path: llama-openvino-linux-x64-${{ matrix.build }}.tar.gz
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: llama-openvino-linux-x64-${{ matrix.build }}.tar.gz
+          body: |
+            OpenVINO backend build for Linux x64
+            
+            ## Supported Devices
+            - CPU (default)
+            - Intel GPU (integrated and discrete)
+            - Intel NPU
+            
+            ## Runtime Configuration
+            Set the target device using environment variable:
+            ```bash
+            # For Intel GPU
+            export GGML_OPENVINO_DEVICE=GPU
+            export GGML_OPENVINO_STATEFUL_EXECUTION=1
+            ./llama-server -m model.gguf -c 4096 --port 8080
+            
+            # For Intel NPU
+            export GGML_OPENVINO_DEVICE=NPU
+            ./llama-server -m model.gguf -c 512 --port 8080
+            ```
+            
+            ## Known Limitations
+            - llama-server with NPU supports only one parallel session (`-np 1`)
+            - NPU requires context size explicitly set to <=1024
+            - Model caching not supported on NPU
+            - GGML_OPENVINO_STATEFUL_EXECUTION=1 must NOT be set for NPU
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Docker build verification
+  docker-openvino:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker Image (Light)
+        run: |
+          docker build --target=light -t llama-openvino:light -f .devops/openvino.Dockerfile .
+
+      - name: Verify Docker Build
+        run: |
+          docker run --rm llama-openvino:light --help | head -20

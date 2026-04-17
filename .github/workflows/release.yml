@@ -385,6 +385,111 @@ jobs:
           path: llama-${{ steps.tag.outputs.name }}-bin-ubuntu-openvino-${{ env.OPENVINO_VERSION_MAJOR }}-x64.tar.gz
           name: llama-bin-ubuntu-openvino-${{ env.OPENVINO_VERSION_MAJOR }}-x64.tar.gz
 
+  windows-openvino:
+    runs-on: windows-2025
+
+    env:
+      OPENVINO_VERSION_MAJOR: "2026.0"
+      OPENVINO_VERSION_FULL: "2026.0.0.20965.c6d6a13a886"
+      OPENVINO_DIR: 'C:\Program Files (x86)\Intel\openvino_2026.0'
+      VS_PATH: 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise'
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: windows-openvino-release
+          variant: ccache
+          evict-old-files: 1d
+
+      - name: Use OpenVINO Toolkit Cache
+        uses: actions/cache@v5
+        id: cache-openvino
+        with:
+          path: ${{ env.OPENVINO_DIR }}
+          key: openvino-toolkit-v${{ env.OPENVINO_VERSION_FULL }}-windows
+
+      - name: Install Ninja
+        run: |
+          choco install ninja
+
+      - name: Download OpenVINO
+        if: steps.cache-openvino.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ov_url = "https://storage.openvinotoolkit.org/repositories/openvino/packages/${{ env.OPENVINO_VERSION_MAJOR }}/windows/openvino_toolkit_windows_${{ env.OPENVINO_VERSION_FULL }}_x86_64.zip"
+          Write-Host "Downloading OpenVINO from: $ov_url"
+          Invoke-WebRequest -Uri $ov_url -OutFile openvino.zip
+          Expand-Archive -Path openvino.zip -DestinationPath "C:\Program Files (x86)\Intel"
+          $extractedPath = Get-ChildItem -Path "C:\Program Files (x86)\Intel" -Directory | Where-Object { $_.Name -like "openvino_toolkit_windows_*" } | Select-Object -First 1
+          if ($extractedPath) {
+              Rename-Item -Path $extractedPath.FullName -NewName "openvino_${{ env.OPENVINO_VERSION_MAJOR }}"
+          }
+
+      - name: Install OpenVINO dependencies
+        if: steps.cache-openvino.outputs.cache-hit != 'true'
+        run: |
+          cd "${{ env.OPENVINO_DIR }}"
+          .\install_dependencies\install_openvino_dependencies.exe --auto
+
+      - name: Build
+        id: cmake_build
+        shell: cmd
+        run: |
+          call "${{ env.VS_PATH }}\VC\Auxiliary\Build\vcvars64.bat"
+          call "${{ env.OPENVINO_DIR }}\setupvars.bat"
+          cmake -B build\ReleaseOV -G Ninja -DCMAKE_BUILD_TYPE=Release ^
+            -DGGML_OPENVINO=ON ^
+            -DLLAMA_CURL=OFF ^
+            -DGGML_NATIVE=OFF
+          cmake --build build\ReleaseOV --parallel --config Release
+
+      - name: Determine tag name
+        id: tag
+        uses: ./.github/actions/get-tag-name
+
+      - name: Pack artifacts
+        id: pack_artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release
+
+          # Copy llama.cpp binaries
+          Copy-Item build\ReleaseOV\bin\llama-server.exe release\
+          Copy-Item build\ReleaseOV\bin\llama-cli.exe release\
+          Copy-Item build\ReleaseOV\bin\llama-bench.exe release\
+          Copy-Item LICENSE release\
+
+          # Copy OpenVINO core runtime DLLs next to the executables so the loader finds them
+          $ovBinPath = "${{ env.OPENVINO_DIR }}\runtime\bin\intel64\Release"
+          if (Test-Path $ovBinPath) {
+              Copy-Item "$ovBinPath\*.dll" release\
+          }
+
+          # Copy bundled TBB and OpenMP runtime DLLs (required by OpenVINO at runtime)
+          $tbbPath = "${{ env.OPENVINO_DIR }}\runtime\3rdparty\tbb\bin"
+          if (Test-Path $tbbPath) {
+              Copy-Item "$tbbPath\*.dll" release\
+          }
+          $ompPath = "${{ env.OPENVINO_DIR }}\runtime\3rdparty\omp\bin"
+          if (Test-Path $ompPath) {
+              Copy-Item "$ompPath\*.dll" release\
+          }
+
+          # Create ZIP archive with proper naming
+          7z a -snl llama-${{ steps.tag.outputs.name }}-bin-win-openvino-${{ env.OPENVINO_VERSION_MAJOR }}-x64.zip .\release\*
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          path: llama-${{ steps.tag.outputs.name }}-bin-win-openvino-${{ env.OPENVINO_VERSION_MAJOR }}-x64.zip
+          name: llama-bin-win-openvino-${{ env.OPENVINO_VERSION_MAJOR }}-x64.zip
+
   windows-cpu:
     runs-on: windows-2025
 
@@ -1036,6 +1141,7 @@ jobs:
       - windows-cuda
       - windows-sycl
       - windows-hip
+      - windows-openvino
       - ubuntu-22-rocm
       - ubuntu-cpu
       - ubuntu-vulkan
@@ -1115,37 +1221,38 @@ jobs:
             </details>
 
             **macOS/iOS:**
-            - [macOS Apple Silicon (arm64)](https://github.com/ggml-org/llama.cpp/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-macos-arm64.tar.gz)
-            - [macOS Apple Silicon (arm64, KleidiAI enabled)](https://github.com/ggml-org/llama.cpp/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-macos-arm64-kleidiai.tar.gz)
-            - [macOS Intel (x64)](https://github.com/ggml-org/llama.cpp/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-macos-x64.tar.gz)
-            - [iOS XCFramework](https://github.com/ggml-org/llama.cpp/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-xcframework.zip)
+            - [macOS Apple Silicon (arm64)](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-macos-arm64.tar.gz)
+            - [macOS Apple Silicon (arm64, KleidiAI enabled)](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-macos-arm64-kleidiai.tar.gz)
+            - [macOS Intel (x64)](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-macos-x64.tar.gz)
+            - [iOS XCFramework](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-xcframework.zip)
 
             **Linux:**
-            - [Ubuntu x64 (CPU)](https://github.com/ggml-org/llama.cpp/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-ubuntu-x64.tar.gz)
-            - [Ubuntu arm64 (CPU)](https://github.com/ggml-org/llama.cpp/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-ubuntu-arm64.tar.gz)
-            - [Ubuntu s390x (CPU)](https://github.com/ggml-org/llama.cpp/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-ubuntu-s390x.tar.gz)
-            - [Ubuntu x64 (Vulkan)](https://github.com/ggml-org/llama.cpp/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-ubuntu-vulkan-x64.tar.gz)
-            - [Ubuntu arm64 (Vulkan)](https://github.com/ggml-org/llama.cpp/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-ubuntu-vulkan-arm64.tar.gz)
-            - [Ubuntu x64 (ROCm 7.2)](https://github.com/ggml-org/llama.cpp/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-ubuntu-rocm-7.2-x64.tar.gz)
-            - [Ubuntu x64 (OpenVINO)](https://github.com/ggml-org/llama.cpp/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-ubuntu-openvino-${{ needs.ubuntu-24-openvino.outputs.openvino_version }}-x64.tar.gz)
+            - [Ubuntu x64 (CPU)](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-ubuntu-x64.tar.gz)
+            - [Ubuntu arm64 (CPU)](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-ubuntu-arm64.tar.gz)
+            - [Ubuntu s390x (CPU)](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-ubuntu-s390x.tar.gz)
+            - [Ubuntu x64 (Vulkan)](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-ubuntu-vulkan-x64.tar.gz)
+            - [Ubuntu arm64 (Vulkan)](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-ubuntu-vulkan-arm64.tar.gz)
+            - [Ubuntu x64 (ROCm 7.2)](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-ubuntu-rocm-7.2-x64.tar.gz)
+            - [Ubuntu x64 (OpenVINO)](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-ubuntu-openvino-${{ needs.ubuntu-24-openvino.outputs.openvino_version }}-x64.tar.gz)
 
             **Android:**
-            - [Android arm64 (CPU)](https://github.com/ggml-org/llama.cpp/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-android-arm64.tar.gz)
+            - [Android arm64 (CPU)](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-android-arm64.tar.gz)
 
             **Windows:**
-            - [Windows x64 (CPU)](https://github.com/ggml-org/llama.cpp/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-win-cpu-x64.zip)
-            - [Windows arm64 (CPU)](https://github.com/ggml-org/llama.cpp/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-win-cpu-arm64.zip)
-            - [Windows x64 (CUDA 12)](https://github.com/ggml-org/llama.cpp/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-win-cuda-12.4-x64.zip) - [CUDA 12.4 DLLs](https://github.com/ggml-org/llama.cpp/releases/download/${{ steps.tag.outputs.name }}/cudart-llama-bin-win-cuda-12.4-x64.zip)
-            - [Windows x64 (CUDA 13)](https://github.com/ggml-org/llama.cpp/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-win-cuda-13.1-x64.zip) - [CUDA 13.1 DLLs](https://github.com/ggml-org/llama.cpp/releases/download/${{ steps.tag.outputs.name }}/cudart-llama-bin-win-cuda-13.1-x64.zip)
-            - [Windows x64 (Vulkan)](https://github.com/ggml-org/llama.cpp/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-win-vulkan-x64.zip)
-            - [Windows x64 (SYCL)](https://github.com/ggml-org/llama.cpp/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-win-sycl-x64.zip)
-            - [Windows x64 (HIP)](https://github.com/ggml-org/llama.cpp/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-win-hip-radeon-x64.zip)
+            - [Windows x64 (CPU)](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-win-cpu-x64.zip)
+            - [Windows arm64 (CPU)](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-win-cpu-arm64.zip)
+            - [Windows x64 (CUDA 12)](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-win-cuda-12.4-x64.zip) - [CUDA 12.4 DLLs](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/cudart-llama-bin-win-cuda-12.4-x64.zip)
+            - [Windows x64 (CUDA 13)](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-win-cuda-13.1-x64.zip) - [CUDA 13.1 DLLs](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/cudart-llama-bin-win-cuda-13.1-x64.zip)
+            - [Windows x64 (Vulkan)](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-win-vulkan-x64.zip)
+            - [Windows x64 (SYCL)](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-win-sycl-x64.zip)
+            - [Windows x64 (HIP)](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-win-hip-radeon-x64.zip)
+            - [Windows x64 (OpenVINO)](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-win-openvino-${{ needs.ubuntu-24-openvino.outputs.openvino_version }}-x64.zip)
 
             **openEuler:**
-            - [openEuler x86 (310p)](https://github.com/ggml-org/llama.cpp/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-310p-openEuler-x86.tar.gz)
-            - [openEuler x86 (910b, ACL Graph)](https://github.com/ggml-org/llama.cpp/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-910b-openEuler-x86-aclgraph.tar.gz)
-            - [openEuler aarch64 (310p)](https://github.com/ggml-org/llama.cpp/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-310p-openEuler-aarch64.tar.gz)
-            - [openEuler aarch64 (910b, ACL Graph)](https://github.com/ggml-org/llama.cpp/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-910b-openEuler-aarch64-aclgraph.tar.gz)
+            - [openEuler x86 (310p)](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-310p-openEuler-x86.tar.gz)
+            - [openEuler x86 (910b, ACL Graph)](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-910b-openEuler-x86-aclgraph.tar.gz)
+            - [openEuler aarch64 (310p)](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-310p-openEuler-aarch64.tar.gz)
+            - [openEuler aarch64 (910b, ACL Graph)](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/llama-${{ steps.tag.outputs.name }}-bin-910b-openEuler-aarch64-aclgraph.tar.gz)
 
       - name: Upload release
         id: upload_release
