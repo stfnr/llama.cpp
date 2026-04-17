@@ -446,7 +446,8 @@ jobs:
           cmake -B build\ReleaseOV -G Ninja -DCMAKE_BUILD_TYPE=Release ^
             -DGGML_OPENVINO=ON ^
             -DLLAMA_CURL=OFF ^
-            -DGGML_NATIVE=OFF
+            -DGGML_NATIVE=OFF ^
+            -DLLAMA_BUILD_BORINGSSL=ON
           cmake --build build\ReleaseOV --parallel --config Release
 
       - name: Determine tag name

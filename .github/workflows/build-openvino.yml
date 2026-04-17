@@ -116,6 +116,7 @@ jobs:
           cmake -B build\ReleaseOV -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build }} ^
             -DGGML_OPENVINO=ON ^
             -DLLAMA_CURL=OFF ^
+            -DLLAMA_BUILD_BORINGSSL=ON ^
             -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake
           
           cmake --build build\ReleaseOV --parallel
