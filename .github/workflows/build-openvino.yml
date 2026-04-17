@@ -246,7 +246,7 @@ jobs:
 
       - name: Download and Install OpenVINO Runtime
         run: |
-          ov_url="https://storage.openvinotoolkit.org/repositories/openvino/packages/${OPENVINO_VERSION_MAJOR}/linux/l_openvino_toolkit_ubuntu24_${OPENVINO_VERSION_FULL}_x86_64.tgz"
+          ov_url="https://storage.openvinotoolkit.org/repositories/openvino/packages/${OPENVINO_VERSION_MAJOR}/linux/openvino_toolkit_ubuntu24_${OPENVINO_VERSION_FULL}_x86_64.tgz"
           echo "Downloading OpenVINO from: $ov_url"
           
           wget -q "$ov_url" -O openvino.tgz
