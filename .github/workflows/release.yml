@@ -464,11 +464,13 @@ jobs:
           Copy-Item build\ReleaseOV\bin\llama-cli.exe release\
           Copy-Item build\ReleaseOV\bin\llama-bench.exe release\
           Copy-Item LICENSE release\
+          Copy-Item build\ReleaseOV\bin\*.dll release\
 
           # Copy OpenVINO core runtime DLLs next to the executables so the loader finds them
           $ovBinPath = "${{ env.OPENVINO_DIR }}\runtime\bin\intel64\Release"
           if (Test-Path $ovBinPath) {
               Copy-Item "$ovBinPath\*.dll" release\
+              Copy-Item "$ovBinPath\plugins.xml" release\
           }
 
           # Copy bundled TBB and OpenMP runtime DLLs (required by OpenVINO at runtime)

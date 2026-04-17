@@ -129,6 +129,7 @@ jobs:
           Copy-Item build\ReleaseOV\bin\llama-server.exe dist\
           Copy-Item build\ReleaseOV\bin\llama-cli.exe dist\
           Copy-Item build\ReleaseOV\bin\llama-bench.exe dist\
+          Copy-Item build\\ReleaseOV\\bin\\*.dll dist\\
 
           # Copy OpenVINO core runtime DLLs next to the executables so the loader finds them
           $ovBinPath = "${{ env.OPENVINO_DIR }}\runtime\bin\intel64\Release"
@@ -136,8 +137,10 @@ jobs:
 
           if (Test-Path $ovBinPath) {
               Copy-Item "$ovBinPath\*.dll" dist\
+              Copy-Item "$ovBinPath\\plugins.xml" dist\\
           } elseif (Test-Path $ovBinPathAlt) {
               Copy-Item "$ovBinPathAlt\*.dll" dist\
+              Copy-Item "$ovBinPathAlt\\plugins.xml" dist\\
           } else {
               Write-Host "Searching for OpenVINO DLLs..."
               Get-ChildItem -Path "${{ env.OPENVINO_DIR }}" -Recurse -Filter "openvino.dll" | Select-Object -First 5
@@ -149,6 +152,7 @@ jobs:
                   $dllFiles = Get-ChildItem -Path $path -Filter "*.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
                   if ($dllFiles) {
                       Copy-Item "$path\*.dll" dist\
+                      Copy-Item "$path\\plugins.xml" dist\\
                       break
                   }
               }
