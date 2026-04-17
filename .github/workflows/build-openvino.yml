@@ -137,10 +137,10 @@ jobs:
 
           if (Test-Path $ovBinPath) {
               Copy-Item "$ovBinPath\*.dll" dist\
-              Copy-Item "$ovBinPath\\plugins.xml" dist\\
+              Copy-Item "$ovBinPath\\plugins.xml" dist\ -ErrorAction SilentlyContinue
           } elseif (Test-Path $ovBinPathAlt) {
               Copy-Item "$ovBinPathAlt\*.dll" dist\
-              Copy-Item "$ovBinPathAlt\\plugins.xml" dist\\
+              Copy-Item "$ovBinPathAlt\\plugins.xml" dist\ -ErrorAction SilentlyContinue
           } else {
               Write-Host "Searching for OpenVINO DLLs..."
               Get-ChildItem -Path "${{ env.OPENVINO_DIR }}" -Recurse -Filter "openvino.dll" | Select-Object -First 5
